@@ -1,0 +1,82 @@
+name: build
+
+# Build-and-pack only: the test suite runs on Travis (.travis.yml).
+# Produces the Go module zip matching
+# https://proxy.golang.org/github.com/!masterminds/goutils/@v/v1.1.0.zip
+on:
+  workflow_dispatch: {}
+
+jobs:
+  module-zip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      MODULE_PATH: github.com/Masterminds/goutils
+      MODULE_VERSION: v1.1.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Compile check (pre-module package, GOPATH mode)
+        env:
+          GO111MODULE: 'off'
+        run: go build .
+
+      - name: Create module zip
+        run: |
+          set -euo pipefail
+          # Zip a copy of the tree with the workflow this fork adds removed,
+          # so the module zip keeps the public member set (no .github).
+          src="$RUNNER_TEMP/module-src"
+          mkdir -p "$src"
+          cp -a "$GITHUB_WORKSPACE/." "$src/"
+          rm -rf "$src/.git" "$src/.github/workflows/build.yml"
+
+          # Helper lives outside the zipped tree; uses Go's own module-zip
+          # implementation (same inclusion rules as proxy.golang.org).
+          helper="$RUNNER_TEMP/create-mod"
+          mkdir -p "$helper"
+          cat > "$helper/main.go" <<'EOF'
+          package main
+
+          import (
+              "log"
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              if len(os.Args) != 5 {
+                log.Fatal("usage: create-mod <module-path> <version> <source-dir> <output-zip>")
+              }
+              m := module.Version{Path: os.Args[1], Version: os.Args[2]}
+              f, err := os.Create(os.Args[4])
+              if err != nil {
+                log.Fatal(err)
+              }
+              defer f.Close()
+              if err := zip.CreateFromDir(f, m, os.Args[3]); err != nil {
+                log.Fatal(err)
+              }
+              log.Printf("created module zip: %s", os.Args[4])
+          }
+          EOF
+          cd "$helper"
+          go mod init example.com/create-mod
+          go get golang.org/x/mod@v0.21.0
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          go run . "$MODULE_PATH" "$MODULE_VERSION" "$src" "$GITHUB_WORKSPACE/dist/$MODULE_VERSION.zip"
+          unzip -l "$GITHUB_WORKSPACE/dist/$MODULE_VERSION.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/v1.1.0.zip
+          if-no-files-found: error
